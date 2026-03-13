@@ -163,7 +163,71 @@ function metQuota(date, activeTime) {
 // Returns: object with 10 properties or empty object {}
 // ============================================================
 function addShiftRecord(textFile, shiftObj) {
-  
+  let fileContent = fs.readFileSync(textFile, { encoding: "utf8" }).trim();
+  let lines = fileContent.split("\n");
+  let header = lines[0];
+  let dataLines = lines.slice(1).filter(line => line.trim() !== "");
+
+  let duplicate = dataLines.some(line => {
+    let parts = line.split(",");
+    return parts[0] === shiftObj.driverID && parts[2] === shiftObj.date;
+  });
+
+  if (duplicate) {
+    return {};
+  }
+
+  let shiftDuration = getShiftDuration(shiftObj.startTime, shiftObj.endTime);
+  let idleTime = getIdleTime(shiftObj.startTime, shiftObj.endTime);
+  let activeTime = getActiveTime(shiftDuration, idleTime);
+  let metQuotaValue = metQuota(shiftObj.date, activeTime);
+
+  let newRecordObj = {
+    driverID: shiftObj.driverID,
+    driverName: shiftObj.driverName,
+    date: shiftObj.date,
+    startTime: shiftObj.startTime,
+    endTime: shiftObj.endTime,
+    shiftDuration: shiftDuration,
+    idleTime: idleTime,
+    activeTime: activeTime,
+    metQuota: metQuotaValue,
+    hasBonus: false
+  };
+
+  let newLine = [
+    newRecordObj.driverID,
+    newRecordObj.driverName,
+    newRecordObj.date,
+    newRecordObj.startTime,
+    newRecordObj.endTime,
+    newRecordObj.shiftDuration,
+    newRecordObj.idleTime,
+    newRecordObj.activeTime,
+    String(newRecordObj.metQuota),
+    String(newRecordObj.hasBonus)
+  ].join(",");
+
+  dataLines.push(newLine);
+  dataLines.sort((a, b) => {
+    let aParts = a.split(",");
+    let bParts = b.split(",");
+
+    if (aParts[0] !== bParts[0]) {
+      return aParts[0].localeCompare(bParts[0]);
+    }
+
+    if (aParts[2] !== bParts[2]) {
+      return aParts[2].localeCompare(bParts[2]);
+    }
+
+    return aParts[3].localeCompare(bParts[3]);
+  });
+
+  let output = [header, ...dataLines].join("\n");
+  fs.writeFileSync(textFile, output, { encoding: "utf8" });
+
+  return newRecordObj;
 }
 
 // ============================================================
@@ -175,7 +239,26 @@ function addShiftRecord(textFile, shiftObj) {
 // Returns: nothing (void)
 // ============================================================
 function setBonus(textFile, driverID, date, newValue) {
-  
+  let fileContent = fs.readFileSync(textFile, { encoding: "utf8" }).trim();
+  let lines = fileContent.split("\n");
+  let header = lines[0];
+  let dataLines = lines.slice(1);
+
+  let updatedLines = dataLines.map(line => {
+    if (line.trim() === "") {
+      return line;
+    }
+
+    let parts = line.split(",");
+    if (parts[0] === driverID && parts[2] === date) {
+      parts[9] = String(newValue);
+      return parts.join(",");
+    }
+
+    return line;
+  });
+
+  fs.writeFileSync(textFile, [header, ...updatedLines].join("\n"), { encoding: "utf8" });
 }
 
 // ============================================================
@@ -186,7 +269,28 @@ function setBonus(textFile, driverID, date, newValue) {
 // Returns: number (-1 if driverID not found)
 // ============================================================
 function countBonusPerMonth(textFile, driverID, month) {
+  let normalizedMonth = String(month).padStart(2, "0");
+  let fileContent = fs.readFileSync(textFile, { encoding: "utf8" }).trim();
+  let lines = fileContent.split("\n").slice(1).filter(line => line.trim() !== "");
 
+  let driverLines = lines.filter(line => line.split(",")[0] === driverID);
+  if (driverLines.length === 0) {
+    return -1;
+  }
+
+  let bonusCount = 0;
+
+  for (let line of driverLines) {
+    let parts = line.split(",");
+    let recordMonth = parts[2].split("-")[1];
+    let hasBonus = parts[9] === "true";
+
+    if (recordMonth === normalizedMonth && hasBonus) {
+      bonusCount += 1;
+    }
+  }
+
+  return bonusCount;
 }
 
 // ============================================================
@@ -197,6 +301,28 @@ function countBonusPerMonth(textFile, driverID, month) {
 // Returns: string formatted as hhh:mm:ss
 // ============================================================
 function getTotalActiveHoursPerMonth(textFile, driverID, month) {
+  let normalizedMonth = String(month).padStart(2, "0");
+  let fileContent = fs.readFileSync(textFile, { encoding: "utf8" }).trim();
+  let lines = fileContent.split("\n").slice(1).filter(line => line.trim() !== "");
+  let totalSeconds = 0;
+
+  for (let line of lines) {
+    let parts = line.split(",");
+    let recordDriverID = parts[0];
+    let recordMonth = parts[2].split("-")[1];
+
+    if (recordDriverID === driverID && recordMonth === normalizedMonth) {
+      let [hours, minutes, seconds] = parts[7].split(":").map(Number);
+      totalSeconds += hours * 3600 + minutes * 60 + seconds;
+    }
+  }
+
+  let hours = Math.floor(totalSeconds / 3600);
+  totalSeconds %= 3600;
+  let minutes = Math.floor(totalSeconds / 60);
+  let seconds = totalSeconds % 60;
+
+  return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
 // ============================================================
@@ -209,8 +335,62 @@ function getTotalActiveHoursPerMonth(textFile, driverID, month) {
 // Returns: string formatted as hhh:mm:ss
 // ============================================================
 function getRequiredHoursPerMonth(textFile, rateFile, bonusCount, driverID, month) {
-}
+  let normalizedMonth = String(month).padStart(2, "0");
+  let shiftsContent = fs.readFileSync(textFile, { encoding: "utf8" }).trim();
+  let shiftLines = shiftsContent.split("\n").slice(1).filter(line => line.trim() !== "");
 
+  let ratesContent = fs.readFileSync(rateFile, { encoding: "utf8" }).trim();
+  let rateLines = ratesContent.split("\n").filter(line => line.trim() !== "");
+  let dayOff = "";
+
+  for (let line of rateLines) {
+    let parts = line.split(",");
+    if (parts[0] === driverID) {
+      dayOff = parts[1];
+      break;
+    }
+  }
+
+  let requiredSeconds = 0;
+
+  for (let line of shiftLines) {
+    let parts = line.split(",");
+    let recordDriverID = parts[0];
+    let recordDate = parts[2];
+    let recordMonth = recordDate.split("-")[1];
+
+    if (recordDriverID !== driverID || recordMonth !== normalizedMonth) {
+      continue;
+    }
+
+    let recordDayName = new Date(`${recordDate}T12:00:00`).toLocaleDateString("en-US", {
+      weekday: "long",
+      timeZone: "UTC"
+    });
+
+    if (recordDayName === dayOff) {
+      continue;
+    }
+
+    if (recordDate >= "2025-04-10" && recordDate <= "2025-04-30") {
+      requiredSeconds += 6 * 3600;
+    } else {
+      requiredSeconds += 8 * 3600 + 24 * 60;
+    }
+  }
+
+  requiredSeconds -= bonusCount * 2 * 3600;
+  if (requiredSeconds < 0) {
+    requiredSeconds = 0;
+  }
+
+  let hours = Math.floor(requiredSeconds / 3600);
+  requiredSeconds %= 3600;
+  let minutes = Math.floor(requiredSeconds / 60);
+  let seconds = requiredSeconds % 60;
+
+  return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
 
 // ============================================================
 // Function 10: getNetPay(driverID, actualHours, requiredHours, rateFile)
@@ -221,8 +401,55 @@ function getRequiredHoursPerMonth(textFile, rateFile, bonusCount, driverID, mont
 // Returns: integer (net pay)
 // ============================================================
 function getNetPay(driverID, actualHours, requiredHours, rateFile) {
-  
+  let ratesContent = fs.readFileSync(rateFile, { encoding: "utf8" }).trim();
+  let rateLines = ratesContent.split("\n").filter(line => line.trim() !== "");
+  let basePay = 0;
+  let tier = 0;
+
+  for (let line of rateLines) {
+    let parts = line.split(",");
+    if (parts[0] === driverID) {
+      basePay = Number(parts[2]);
+      tier = Number(parts[3]);
+      break;
+    }
+  }
+
+  let [actualHrs, actualMins, actualSecs] = actualHours.split(":").map(Number);
+  let [requiredHrs, requiredMins, requiredSecs] = requiredHours.split(":").map(Number);
+
+  let actualTotalSeconds = actualHrs * 3600 + actualMins * 60 + actualSecs;
+  let requiredTotalSeconds = requiredHrs * 3600 + requiredMins * 60 + requiredSecs;
+  let missingSeconds = requiredTotalSeconds - actualTotalSeconds;
+
+  if (missingSeconds <= 0) {
+    return basePay;
+  }
+
+  let missingHours = missingSeconds / 3600;
+  let allowedMissingHours = 0;
+
+  if (tier === 1) {
+    allowedMissingHours = 50;
+  } else if (tier === 2) {
+    allowedMissingHours = 20;
+  } else if (tier === 3) {
+    allowedMissingHours = 10;
+  } else if (tier === 4) {
+    allowedMissingHours = 3;
+  }
+
+  if (missingHours <= allowedMissingHours) {
+    return basePay;
+  }
+
+  let excessMissingHours = Math.floor(missingHours - allowedMissingHours);
+  let deductionRatePerHour = Math.floor(basePay / 185);
+  let salaryDeduction = excessMissingHours * deductionRatePerHour;
+
+  return basePay - salaryDeduction;
 }
+
 
 module.exports = {
     getShiftDuration,
